@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Bybit CE + ZLSMA Live MVP</title>
+
+<style>
+body { font-family: Arial; background:#0d0d0d; color:#eee; padding:20px; }
+.box { background:#1a1a1a; padding:10px; margin-bottom:10px; border-radius:8px; }
+.row { display:flex; gap:15px; }
+canvas { background:#111; border-radius:8px; }
+</style>
+</head>
+
+<body>
+
+<h2>📊 Bybit Live CE + ZLSMA Paper Trading</h2>
+
+<div class="row">
+
+<div class="box">
+<div>Price: <span id="price"></span></div>
+<div>Balance: <span id="balance"></span></div>
+<div>Position: <span id="pos"></span></div>
+<div>Signal: <span id="sig"></span></div>
+</div>
+
+<div class="box">
+<canvas id="chart" width="600" height="250"></canvas>
+</div>
+
+</div>
+
+<div class="box">
+<h3>Trades</h3>
+<pre id="trades"></pre>
+</div>
+
+<script>
+// =========================
+// CONFIG
+// =========================
+let balance = 1000;
+let position = null;
+let trades = [];
+
+let price = 0;
+
+// candles
+let candles = [];
+let currentCandle = null;
+
+// =========================
+// BYBIT LIVE PRICE (REST POLLING)
+// =========================
+async function fetchPrice(){
+    try {
+        let res = await fetch("https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT");
+        let data = await res.json();
+        return parseFloat(data.result.list[0].lastPrice);
+    } catch(e){
+        return price;
+    }
+}
+
+// =========================
+// CANDLE BUILDER (1m)
+// =========================
+function updateCandle(p){
+    let now = Date.now();
+    let minute = Math.floor(now / 60000);
+
+    if(!currentCandle || currentCandle.minute !== minute){
+        if(currentCandle) candles.push(currentCandle);
+
+        currentCandle = {
+            minute,
+            open:p,
+            high:p,
+            low:p,
+            close:p
+        };
+
+        if(candles.length > 200) candles.shift();
+    } else {
+        currentCandle.high = Math.max(currentCandle.high, p);
+        currentCandle.low = Math.min(currentCandle.low, p);
+        currentCandle.close = p;
+    }
+}
+
+// =========================
+// INDICATORS
+// =========================
+function linreg(arr){
+    let n = arr.length;
+    let sx=0, sy=0, sxy=0, sx2=0;
+
+    for(let i=0;i<n;i++){
+        sx+=i; sy+=arr[i];
+        sxy+=i*arr[i];
+        sx2+=i*i;
+    }
+
+    let m = (n*sxy - sx*sy)/(n*sx2 - sx*sx);
+    let b = (sy - m*sx)/n;
+
+    return m*(n-1)+b;
+}
+
+function zlsma(arr){
+    if(arr.length < 38) return arr[arr.length-1];
+
+    let lsma = linreg(arr.slice(-38));
+
+    let tmp = [];
+    for(let i=10;i<38;i++){
+        tmp.push(linreg(arr.slice(-i)));
+    }
+
+    let lsma2 = linreg(tmp);
+
+    return lsma + (lsma - lsma2);
+}
+
+function atr(len=4){
+    if(candles.length < len+1) return 0;
+
+    let tr = [];
+    for(let i=1;i<candles.length;i++){
+        let c = candles[i];
+        let p = candles[i-1].close;
+
+        tr.push(Math.max(
+            c.high - c.low,
+            Math.abs(c.high - p),
+            Math.abs(c.low - p)
+        ));
+    }
+
+    return tr.slice(-len).reduce((a,b)=>a+b,0)/len;
+}
+
+function chandelier(){
+    let len=4, mult=2;
+    if(candles.length < len) return {longStop:0, shortStop:0};
+
+    let highs = candles.map(c=>c.high);
+    let lows = candles.map(c=>c.low);
+
+    let a = atr(len);
+
+    return {
+        longStop: Math.max(...highs.slice(-len)) - a*mult,
+        shortStop: Math.min(...lows.slice(-len)) + a*mult
+    };
+}
+
+// =========================
+// STRATEGY
+// =========================
+let entry=null, risk=null, movedBE=false;
+
+function runStrategy(){
+    if(candles.length < 40) return;
+
+    let closes = candles.map(c=>c.close);
+
+    let z = zlsma(closes);
+    let prevZ = zlsma(closes.slice(0,-1));
+
+    let {longStop, shortStop} = chandelier();
+
+    let dir = price > shortStop ? 1 : price < longStop ? -1 : 0;
+
+    let prev = closes[closes.length-2];
+
+    let signal = null;
+
+    if(dir === 1 && prev <= prevZ && price > z){
+        signal = "LONG";
+        position = "long";
+        entry = price;
+        risk = price - longStop;
+        movedBE = false;
+    }
+
+    if(dir === -1 && prev >= prevZ && price < z){
+        signal = "SHORT";
+        position = "short";
+        entry = price;
+        risk = shortStop - price;
+        movedBE = false;
+    }
+
+    // exits
+    if(position === "long"){
+        if(price >= entry + risk) movedBE = true;
+
+        let sl = movedBE ? entry : entry - risk;
+        let tp = entry + risk;
+
+        if(price <= sl || price >= tp){
+            let pnl = price - entry;
+            balance += pnl;
+            trades.push(pnl.toFixed(2));
+            position=null;
+        }
+    }
+
+    if(position === "short"){
+        if(price <= entry - risk) movedBE = true;
+
+        let sl = movedBE ? entry : entry + risk;
+        let tp = entry - risk;
+
+        if(price >= sl || price <= tp){
+            let pnl = entry - price;
+            balance += pnl;
+            trades.push(pnl.toFixed(2));
+            position=null;
+        }
+    }
+
+    document.getElementById("sig").innerText = signal;
+}
+
+// =========================
+// CHART
+// =========================
+function draw(){
+    let ctx = document.getElementById("chart").getContext("2d");
+
+    ctx.clearRect(0,0,600,250);
+
+    let last = candles.slice(-50);
+
+    let max = Math.max(...last.map(c=>c.high));
+    let min = Math.min(...last.map(c=>c.low));
+
+    let w = 600 / last.length;
+
+    last.forEach((c,i)=>{
+        let x = i*w;
+
+        let y1 = 250 - ((c.high-min)/(max-min))*250;
+        let y2 = 250 - ((c.low-min)/(max-min))*250;
+
+        ctx.strokeStyle="white";
+        ctx.beginPath();
+        ctx.moveTo(x+2,y1);
+        ctx.lineTo(x+2,y2);
+        ctx.stroke();
+
+        ctx.fillStyle="green";
+        ctx.fillRect(x,y2,3,Math.max(2,(c.close-c.open)));
+    });
+}
+
+// =========================
+// LOOP
+// =========================
+async function loop(){
+
+    price = await fetchPrice();
+
+    updateCandle(price);
+    runStrategy();
+
+    draw();
+
+    document.getElementById("price").innerText = price.toFixed(2);
+    document.getElementById("balance").innerText = balance.toFixed(2);
+    document.getElementById("pos").innerText = position;
+
+    document.getElementById("trades").innerText =
+        trades.slice(-10).join("\n");
+}
+
+setInterval(loop, 2000);
+
+</script>
+
+</body>
+</html>
