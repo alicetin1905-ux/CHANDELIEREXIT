@@ -1,0 +1,13 @@
+{
+  "name": "sentry-worker",
+  "version": "1.0.0",
+  "description": "SENTRY 24/7 worker (Mac mini edition): 5-condition signals, Telegram alerts, paper trading with fees, local state persistence.",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}
